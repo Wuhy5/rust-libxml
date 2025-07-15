@@ -145,7 +145,7 @@ fn find_libxml2() -> Option<ProbedLib> {
 }
 
 fn generate_bindings(header_dirs: Vec<PathBuf>, output_path: &Path) {
-  let bindings = bindgen::Builder::default()
+  let mut builder = bindgen::Builder::default()
     .header("src/wrapper.h")
     .opaque_type("max_align_t")
     // invalidate build as soon as the wrapper changes
@@ -153,7 +153,23 @@ fn generate_bindings(header_dirs: Vec<PathBuf>, output_path: &Path) {
     .layout_tests(true)
     .clang_args(&["-DPKG-CONFIG"])
     .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())));
-  bindings
+
+  // 如果是Android交叉编译，需要设置正确的sysroot和target
+  if is_android_target() {
+    if let Ok(ndk_root) = env::var("ANDROID_NDK_ROOT") {
+      let target = get_target_platform();
+      let api_level = env::var("ANDROID_API_LEVEL").unwrap_or_else(|_| "21".to_string());
+      
+      // 设置sysroot
+      let sysroot = format!("{}/toolchains/llvm/prebuilt/linux-x86_64/sysroot", ndk_root);
+      builder = builder.clang_args(&[
+        "--sysroot", &sysroot,
+        "--target", &format!("{}{}", target, api_level),
+      ]);
+    }
+  }
+
+  builder
     .generate()
     .expect("failed to generate bindings with bindgen")
     .write_to_file(output_path)

@@ -50,10 +50,31 @@ jobs:
             --src-dir ./build/src \
             --install-dir ./prebuilt/android-21
 
+      - name: Verify libxml2 installation
+        run: |
+          echo "Checking libxml2 installation for ${{ matrix.arch }}..."
+          LIB_PATH="./prebuilt/android-21/${{ matrix.arch }}"
+          
+          if [ ! -f "$LIB_PATH/lib/libxml2.a" ]; then
+            echo "ERROR: libxml2.a not found at $LIB_PATH/lib/libxml2.a"
+            exit 1
+          fi
+          
+          if [ ! -d "$LIB_PATH/include/libxml2" ]; then
+            echo "ERROR: libxml2 headers not found at $LIB_PATH/include/libxml2"
+            exit 1
+          fi
+          
+          echo "✓ libxml2.a found: $(ls -la $LIB_PATH/lib/libxml2.a)"
+          echo "✓ Headers found: $(ls -la $LIB_PATH/include/)"
+          echo "✓ libxml2 headers: $(ls -la $LIB_PATH/include/libxml2/ | head -5)"
+
       - name: Test Rust build
         run: |
           echo "Building for target: ${{ matrix.target }}"
           cargo build --target ${{ matrix.target }} --release -vv
         env:
           LIBXML2_PREBUILT_PATH: ${{ github.workspace }}/prebuilt/android-21
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+          ANDROID_API_LEVEL: "21"
           RUST_BACKTRACE: 1
