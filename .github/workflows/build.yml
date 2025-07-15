@@ -81,8 +81,9 @@ jobs:
           # 设置Android库 (如果存在)
           if [ -d "artifacts/libxml2-android-${{ matrix.arch }}" ]; then
             echo "Setting up Android prebuilt libraries for ${{ matrix.arch }}"
-            cp -r artifacts/libxml2-android-${{ matrix.arch }}/* prebuilt/
-            echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt" >> $GITHUB_ENV
+            mkdir -p prebuilt/android-21
+            cp -r "artifacts/libxml2-android-${{ matrix.arch }}" "prebuilt/android-21/${{ matrix.arch }}"
+            echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
           else
             echo "No prebuilt libraries found for ${{ matrix.arch }}"
           fi
