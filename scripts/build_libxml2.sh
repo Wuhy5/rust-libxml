@@ -200,11 +200,13 @@ build_android() {
     fi
 
     local libxml2_src="$src_dir/libxml2"
-    local arch_install_dir
-    arch_install_dir="$(cd "$install_dir/$arch" && pwd)"
+    local arch_install_dir="$install_dir/$arch"
 
     # 确保安装目录存在
     mkdir -p "$arch_install_dir"
+
+    # 获取绝对路径
+    arch_install_dir="$(cd "$arch_install_dir" && pwd)"
 
     # 进入源码目录
     cd "$libxml2_src"
