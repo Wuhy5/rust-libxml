@@ -188,6 +188,10 @@ build_android() {
     export RANLIB="$toolchain_bin/${toolchain_prefix}-ranlib"
     export STRIP="$toolchain_bin/${toolchain_prefix}-strip"
     export LIBS="-ldl"
+    
+    # 确保libtool使用正确的工具链
+    export LDFLAGS="-L$toolchain_bin"
+    export CPPFLAGS="-I$ndk_path/sysroot/usr/include"
 
     # 检查工具链
     if [[ ! -x "$CC" ]]; then
@@ -225,7 +229,12 @@ build_android() {
         --without-http \
         --without-ftp \
         --without-debug \
-        --without-catalog; then
+        --without-catalog \
+        AR="$AR" \
+        CC="$CC" \
+        CXX="$CXX" \
+        RANLIB="$RANLIB" \
+        STRIP="$STRIP"; then
         log_error "Configuration failed for $arch"
         return 1
     fi

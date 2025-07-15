@@ -16,12 +16,18 @@ jobs:
         arch: [arm64-v8a, armeabi-v7a, x86, x86_64]
 
     steps:
-      - uses: actions/checkout@v4
-
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r25c
+          
+      - name: Verify NDK installation
+        run: |
+          echo "NDK path: $ANDROID_NDK_ROOT"
+          ls -la "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | head -20
 
       - name: Build libxml2 for Android
         run: |
@@ -72,18 +78,6 @@ jobs:
               fi
             done
             echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
-          fi
-
-          # 设置iOS库 (如果存在且在macOS上)
-          if [ "${{ matrix.os }}" = "macos-latest" ] && [ -d "artifacts/libxml2-ios-arm64" ]; then
-            mkdir -p prebuilt/ios/universal/lib
-            mkdir -p prebuilt/ios/universal/include
-            cp -r artifacts/libxml2-ios-arm64/include/* prebuilt/ios/universal/include/
-            lipo -create \
-              artifacts/libxml2-ios-arm64/lib/libxml2.a \
-              artifacts/libxml2-ios-x86_64/lib/libxml2.a \
-              -output prebuilt/ios/universal/lib/libxml2.a
-            echo "LIBXML2_IOS_PATH=$(pwd)/prebuilt/ios/universal" >> $GITHUB_ENV
           fi
 
       - name: Test Rust build
