@@ -102,13 +102,17 @@ INSTALL_DIR="${INSTALL_DIR:-$PROJECT_ROOT/build/install}"
 mkdir -p "$SRC_DIR"
 mkdir -p "$INSTALL_DIR"
 
-# Android架构映射
-declare -A ANDROID_ARCHS=(
-    ["arm64-v8a"]="aarch64-linux-android"
-    ["armeabi-v7a"]="armv7a-linux-androideabi"
-    ["x86"]="i686-linux-android"
-    ["x86_64"]="x86_64-linux-android"
-)
+# Android架构映射函数
+get_android_toolchain_prefix() {
+    local arch="$1"
+    case "$arch" in
+    "arm64-v8a") echo "aarch64-linux-android" ;;
+    "armeabi-v7a") echo "armv7a-linux-androideabi" ;;
+    "x86") echo "i686-linux-android" ;;
+    "x86_64") echo "x86_64-linux-android" ;;
+    *) echo "" ;;
+    esac
+}
 
 download_libxml2() {
     local src_dir="$1"
@@ -147,15 +151,12 @@ build_android() {
     local ndk_path="$2"
     local api_level="$3"
     local src_dir="$4"
-    local install_dir="$5"
-
-    # 检查架构支持
-    if [[ -z "${ANDROID_ARCHS[$arch]}" ]]; then
+    local install_dir="$5" # 检查架构支持
+    local toolchain_prefix=$(get_android_toolchain_prefix "$arch")
+    if [[ -z "$toolchain_prefix" ]]; then
         log_error "Unsupported Android architecture: $arch"
         return 1
     fi
-
-    local toolchain_prefix="${ANDROID_ARCHS[$arch]}"
 
     # 检查NDK
     if [[ ! -d "$ndk_path" ]]; then
@@ -197,7 +198,7 @@ build_android() {
     fi
 
     local libxml2_src="$src_dir/libxml2"
-    local arch_install_dir="$install_dir/$arch"
+    local arch_install_dir="$(realpath "$install_dir/$arch")"
 
     # 确保安装目录存在
     mkdir -p "$arch_install_dir"
@@ -225,7 +226,6 @@ build_android() {
         --without-http \
         --without-ftp \
         --without-debug \
-        --without-docbook \
         --without-catalog; then
         log_error "Configuration failed for $arch"
         return 1
@@ -302,7 +302,7 @@ build_ios() {
     export LDFLAGS="-arch $arch -isysroot $ios_sdk_path -miphoneos-version-min=$min_ios_version"
 
     local libxml2_src="$src_dir/libxml2"
-    local arch_install_dir="$install_dir/$arch"
+    local arch_install_dir="$(realpath "$install_dir/$arch")"
 
     # 确保安装目录存在
     mkdir -p "$arch_install_dir"
@@ -330,7 +330,6 @@ build_ios() {
         --without-http \
         --without-ftp \
         --without-debug \
-        --without-docbook \
         --without-catalog; then
         log_error "Configuration failed for iOS $arch"
         return 1
