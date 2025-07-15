@@ -182,16 +182,16 @@ build_android() {
     fi
 
     # 设置环境变量
-    export AR="$toolchain_bin/${toolchain_prefix}-ar"
+    export AR="$toolchain_bin/llvm-ar"
     export CC="$toolchain_bin/${toolchain_prefix}${api_level}-clang"
     export CXX="$toolchain_bin/${toolchain_prefix}${api_level}-clang++"
-    export RANLIB="$toolchain_bin/${toolchain_prefix}-ranlib"
-    export STRIP="$toolchain_bin/${toolchain_prefix}-strip"
+    export RANLIB="$toolchain_bin/llvm-ranlib"
+    export STRIP="$toolchain_bin/llvm-strip"
     export LIBS="-ldl"
-    
+
     # 确保libtool使用正确的工具链
-    export LDFLAGS="-L$toolchain_bin"
-    export CPPFLAGS="-I$ndk_path/sysroot/usr/include"
+    export LDFLAGS=""
+    export CPPFLAGS=""
 
     # 检查工具链
     if [[ ! -x "$CC" ]]; then
@@ -234,9 +234,20 @@ build_android() {
         CC="$CC" \
         CXX="$CXX" \
         RANLIB="$RANLIB" \
-        STRIP="$STRIP"; then
+        STRIP="$STRIP" \
+        LDFLAGS="$LDFLAGS" \
+        CPPFLAGS="$CPPFLAGS" \
+        LIBS="$LIBS"; then
         log_error "Configuration failed for $arch"
         return 1
+    fi
+
+    # 修复libtool配置
+    if [[ -f "libtool" ]]; then
+        log_info "Fixing libtool configuration..."
+        sed -i "s|${toolchain_prefix}-ar|$AR|g" libtool
+        sed -i "s|${toolchain_prefix}-ranlib|$RANLIB|g" libtool
+        sed -i "s|${toolchain_prefix}-strip|$STRIP|g" libtool
     fi
 
     log_info "Building libxml2 for Android $arch..."

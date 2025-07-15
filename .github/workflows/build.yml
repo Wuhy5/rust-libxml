@@ -18,12 +18,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r25c
-          
+          add-to-path: true
+
       - name: Verify NDK installation
         run: |
           echo "NDK path: $ANDROID_NDK_ROOT"
