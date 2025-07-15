@@ -101,6 +101,6 @@ jobs:
 
           cargo build --target ${{ matrix.target }} --release -vv
         env:
-          LIBXML2_PREBUILT_PATH: ${{ github.workspace }}/prebuilt/android-21/${{ matrix.arch }}
+          LIBXML2_PREBUILT_PATH: ${{ github.workspace }}/prebuilt/android-21
           ANDROID_API_LEVEL: "21"
           RUST_BACKTRACE: 1
