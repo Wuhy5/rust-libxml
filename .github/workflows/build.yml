@@ -51,6 +51,9 @@ jobs:
   test-rust-build:
     needs: [build-android]
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64-v8a, armeabi-v7a, x86, x86_64]
     steps:
       - uses: actions/checkout@v4
 
@@ -67,41 +70,17 @@ jobs:
           mkdir -p prebuilt
 
           # 设置Android库 (如果存在)
-          if [ -d "artifacts/libxml2-android-arm64-v8a" ]; then
-          mkdir -p prebuilt/android-21
-          for arch in arm64-v8a armeabi-v7a x86 x86_64; do
-            if [ -d "artifacts/libxml2-android-$arch" ]; then
-            cp -r "artifacts/libxml2-android-$arch" "prebuilt/android-21/$arch"
-            fi
-          done
-          echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
+          if [ -d "artifacts/libxml2-android-${{ matrix.arch }}" ]; then
+            echo "Setting up Android prebuilt libraries for ${{ matrix.arch }}"
+            cp -r artifacts/libxml2-android-${{ matrix.arch }}/* prebuilt/
+            echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt" >> $GITHUB_ENV
+          else
+            echo "No prebuilt libraries found for ${{ matrix.arch }}"
           fi
 
-      - name: Test Rust build (Android cross, arm64-v8a)
+      - name: Test Rust build
         run: |
-          rustup target add aarch64-linux-android
-          cargo build --target aarch64-linux-android --release -vv
+          rustup target add ${{ matrix.arch }}-linux-android
+          cargo build --target ${{ matrix.arch }}-linux-android --release -vv
         env:
           RUST_BACKTRACE: 1
-
-      - name: Test Rust build (Android cross, armeabi-v7a)
-        run: |
-          rustup target add armv7-linux-androideabi
-          cargo build --target armv7-linux-androideabi --release -vv
-        env:
-          RUST_BACKTRACE: 1
-
-      - name: Test Rust build (Android cross, x86)
-        run: |
-          rustup target add i686-linux-android
-          cargo build --target i686-linux-android --release -vv
-        env:
-          RUST_BACKTRACE: 1
-
-      - name: Test Rust build (Android cross, x86_64)
-        run: |
-          rustup target add x86_64-linux-android
-          cargo build --target x86_64-linux-android --release -vv
-        env:
-          RUST_BACKTRACE: 1
-          
