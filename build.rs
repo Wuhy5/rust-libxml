@@ -152,15 +152,30 @@ fn generate_bindings(header_dirs: Vec<PathBuf>, output_path: &Path) {
     .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
     .layout_tests(true)
     .clang_args(&["-DPKG-CONFIG"])
-    .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())));  // 如果是Android交叉编译，需要设置正确的sysroot和target
+    .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())));
   if is_android_target() {
     if let Ok(ndk_root) = env::var("ANDROID_NDK_ROOT") {
       let target = get_target_platform();
       let api_level = env::var("ANDROID_API_LEVEL").unwrap_or_else(|_| "21".to_string());
-      
+
+      println!("cargo:warning=Building for Android target: {}", target);
+      println!("cargo:warning=Using NDK: {}", ndk_root);
+      println!("cargo:warning=API level: {}", api_level);
+
+      // 检测主机操作系统
+      let host_os = if cfg!(target_os = "linux") {
+        "linux-x86_64"
+      } else if cfg!(target_os = "macos") {
+        "darwin-x86_64"
+      } else if cfg!(target_os = "windows") {
+        "windows-x86_64"
+      } else {
+        "linux-x86_64" // 默认
+      };
+
       // 设置sysroot和target
-      let sysroot = format!("{}/toolchains/llvm/prebuilt/linux-x86_64/sysroot", ndk_root);
-      
+      let sysroot = format!("{}/toolchains/llvm/prebuilt/{}/sysroot", ndk_root, host_os);
+
       // 构建正确的target triple
       let clang_target = if target.contains("aarch64") {
         format!("aarch64-linux-android{}", api_level)
@@ -173,16 +188,38 @@ fn generate_bindings(header_dirs: Vec<PathBuf>, output_path: &Path) {
       } else {
         format!("{}{}", target, api_level)
       };
-      
-      builder = builder.clang_args(&[
-        "--sysroot", &sysroot,
-        "-target", &clang_target,
-      ]);
-      
+
       // 添加Android特定的系统头文件路径
       let usr_include = format!("{}/usr/include", sysroot);
+      let arch_include = if target.contains("aarch64") {
+        format!("{}/usr/include/aarch64-linux-android", sysroot)
+      } else if target.contains("armv7") {
+        format!("{}/usr/include/arm-linux-androideabi", sysroot)
+      } else if target.contains("i686") {
+        format!("{}/usr/include/i686-linux-android", sysroot)
+      } else if target.contains("x86_64") {
+        format!("{}/usr/include/x86_64-linux-android", sysroot)
+      } else {
+        usr_include.clone()
+      };
+
+      println!("cargo:warning=Using host OS: {}", host_os);
+      println!("cargo:warning=Using sysroot: {}", sysroot);
+      println!("cargo:warning=Using clang target: {}", clang_target);
+      println!(
+        "cargo:warning=Using include paths: {} and {}",
+        usr_include, arch_include
+      );
+
       builder = builder.clang_args(&[
+        "--sysroot",
+        &sysroot,
+        "-target",
+        &clang_target,
         &format!("-I{}", usr_include),
+        &format!("-I{}", arch_include),
+        "-D__ANDROID_API__=21",
+        "-D__ANDROID__",
       ]);
     }
   }

@@ -31,8 +31,8 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r25c
-          add-to-path: true
-
+          add-to-path: true      
+      
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -41,7 +41,20 @@ jobs:
 
       - name: Build libxml2 for Android
         run: |
+          echo "Building libxml2 for Android ${{ matrix.arch }}..."
+          echo "NDK path: $ANDROID_NDK_ROOT"
+          echo "Target: ${{ matrix.target }}"
+          
+          # 确保脚本有执行权限
           chmod +x scripts/build_libxml2.sh
+          
+          # 检查NDK是否存在
+          if [ ! -d "$ANDROID_NDK_ROOT" ]; then
+            echo "ERROR: ANDROID_NDK_ROOT not found: $ANDROID_NDK_ROOT"
+            exit 1
+          fi
+          
+          # 运行构建脚本
           ./scripts/build_libxml2.sh \
             --platform android \
             --arch ${{ matrix.arch }} \
@@ -68,10 +81,30 @@ jobs:
           echo "✓ libxml2.a found: $(ls -la $LIB_PATH/lib/libxml2.a)"
           echo "✓ Headers found: $(ls -la $LIB_PATH/include/)"
           echo "✓ libxml2 headers: $(ls -la $LIB_PATH/include/libxml2/ | head -5)"
-
+          # 列出所有头文件
+          ls -la $LIB_PATH/include/libxml2/      
       - name: Test Rust build
         run: |
           echo "Building for target: ${{ matrix.target }}"
+          echo "ANDROID_NDK_ROOT: $ANDROID_NDK_ROOT"
+          echo "LIBXML2_PREBUILT_PATH: $LIBXML2_PREBUILT_PATH"
+          
+          # 验证NDK路径
+          if [ ! -d "$ANDROID_NDK_ROOT" ]; then
+            echo "ERROR: ANDROID_NDK_ROOT not found: $ANDROID_NDK_ROOT"
+            exit 1
+          fi
+          
+          # 验证sysroot路径
+          SYSROOT="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          if [ ! -d "$SYSROOT" ]; then
+            echo "ERROR: NDK sysroot not found: $SYSROOT"
+            exit 1
+          fi
+          
+          echo "✓ NDK sysroot found: $SYSROOT"
+          echo "✓ stdio.h location: $(find $SYSROOT -name stdio.h | head -1)"
+          
           cargo build --target ${{ matrix.target }} --release -vv
         env:
           LIBXML2_PREBUILT_PATH: ${{ github.workspace }}/prebuilt/android-21
