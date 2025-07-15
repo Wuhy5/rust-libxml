@@ -19,3 +19,5 @@ Cargo.lock
 
 # Test results
 /tags
+
+/build
