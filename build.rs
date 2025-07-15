@@ -152,19 +152,37 @@ fn generate_bindings(header_dirs: Vec<PathBuf>, output_path: &Path) {
     .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
     .layout_tests(true)
     .clang_args(&["-DPKG-CONFIG"])
-    .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())));
-
-  // 如果是Android交叉编译，需要设置正确的sysroot和target
+    .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())));  // 如果是Android交叉编译，需要设置正确的sysroot和target
   if is_android_target() {
     if let Ok(ndk_root) = env::var("ANDROID_NDK_ROOT") {
       let target = get_target_platform();
       let api_level = env::var("ANDROID_API_LEVEL").unwrap_or_else(|_| "21".to_string());
       
-      // 设置sysroot
+      // 设置sysroot和target
       let sysroot = format!("{}/toolchains/llvm/prebuilt/linux-x86_64/sysroot", ndk_root);
+      
+      // 构建正确的target triple
+      let clang_target = if target.contains("aarch64") {
+        format!("aarch64-linux-android{}", api_level)
+      } else if target.contains("armv7") {
+        format!("armv7a-linux-androideabi{}", api_level)
+      } else if target.contains("i686") {
+        format!("i686-linux-android{}", api_level)
+      } else if target.contains("x86_64") {
+        format!("x86_64-linux-android{}", api_level)
+      } else {
+        format!("{}{}", target, api_level)
+      };
+      
       builder = builder.clang_args(&[
         "--sysroot", &sysroot,
-        "--target", &format!("{}{}", target, api_level),
+        "-target", &clang_target,
+      ]);
+      
+      // 添加Android特定的系统头文件路径
+      let usr_include = format!("{}/usr/include", sysroot);
+      builder = builder.clang_args(&[
+        &format!("-I{}", usr_include),
       ]);
     }
   }
