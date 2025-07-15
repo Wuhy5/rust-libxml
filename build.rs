@@ -1,4 +1,7 @@
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+  env, fs,
+  path::{Path, PathBuf},
+};
 
 struct ProbedLib {
   version: String,
@@ -36,25 +39,38 @@ fn handle_android_cross_compile() -> Option<ProbedLib> {
   let arch = get_android_arch()?;
   println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
   println!("cargo:rerun-if-env-changed=LIBXML2_PREBUILT_PATH");
-  
   // 检查是否有预构建的库
   if let Ok(prebuilt_path) = env::var("LIBXML2_PREBUILT_PATH") {
     let lib_path = PathBuf::from(&prebuilt_path).join(&arch);
     if lib_path.join("lib").join("libxml2.a").exists() {
-      println!("cargo:rustc-link-search=native={}", lib_path.join("lib").display());
+      println!(
+        "cargo:rustc-link-search=native={}",
+        lib_path.join("lib").display()
+      );
       println!("cargo:rustc-link-lib=static=xml2");
+
+      // libxml2的头文件通常在include/libxml2目录中
+      let mut include_paths = vec![lib_path.join("include")];
+      let libxml2_include = lib_path.join("include").join("libxml2");
+      if libxml2_include.exists() {
+        include_paths.push(libxml2_include);
+      }
+
       return Some(ProbedLib {
         version: "2.10.3".to_string(),
-        include_paths: vec![lib_path.join("include")],
+        include_paths,
       });
     }
   }
-  
+
   // 如果没有预构建库，提示用户构建
-  println!("cargo:warning=No prebuilt libxml2 found for Android {}. Please run:", arch);
+  println!(
+    "cargo:warning=No prebuilt libxml2 found for Android {}. Please run:",
+    arch
+  );
   println!("cargo:warning=  ./scripts/build_libxml2.sh --platform android --arch {} --ndk-path $ANDROID_NDK_ROOT", arch);
   println!("cargo:warning=  export LIBXML2_PREBUILT_PATH=./prebuilt/android-21");
-  
+
   None
 }
 
@@ -100,7 +116,11 @@ fn find_libxml2() -> Option<ProbedLib> {
     );
     None
   } else {
-    #[cfg(any(target_family = "unix", target_os = "macos", all(target_family="windows", target_env="gnu")))]
+    #[cfg(any(
+      target_family = "unix",
+      target_os = "macos",
+      all(target_family = "windows", target_env = "gnu")
+    ))]
     {
       let lib = pkg_config::Config::new()
         .probe("libxml-2.0")
@@ -108,12 +128,12 @@ fn find_libxml2() -> Option<ProbedLib> {
       return Some(ProbedLib {
         include_paths: lib.include_paths,
         version: lib.version,
-      })
+      });
     }
 
     #[cfg(all(target_family = "windows", target_env = "msvc"))]
     {
-      if let Some(meta) =  vcpkg_dep::vcpkg_find_libxml2() {
+      if let Some(meta) = vcpkg_dep::vcpkg_find_libxml2() {
         return Some(meta);
       } else {
         eprintln!("vcpkg did not succeed in finding libxml2.");
@@ -132,10 +152,7 @@ fn generate_bindings(header_dirs: Vec<PathBuf>, output_path: &Path) {
     .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
     .layout_tests(true)
     .clang_args(&["-DPKG-CONFIG"])
-    .clang_args(
-      header_dirs.iter()
-        .map(|dir| format!("-I{}", dir.display()))
-    );
+    .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())));
   bindings
     .generate()
     .expect("failed to generate bindings with bindgen")
@@ -152,10 +169,13 @@ fn main() {
     // if we could find header files, generate fresh bindings from them
     generate_bindings(probed_lib.include_paths, &bindings_path);
     // and expose the libxml2 version to the code
-    let version_parts: Vec<i32> = probed_lib.version.split('.')
-      .map(|part| part.parse::<i32>().unwrap_or(-1)).collect();
-    let older_than_2_12 = version_parts.len() > 1 && (version_parts[0] < 2 ||
-        version_parts[0] == 2 && version_parts[1] < 12);
+    let version_parts: Vec<i32> = probed_lib
+      .version
+      .split('.')
+      .map(|part| part.parse::<i32>().unwrap_or(-1))
+      .collect();
+    let older_than_2_12 = version_parts.len() > 1
+      && (version_parts[0] < 2 || version_parts[0] == 2 && version_parts[1] < 12);
     println!("cargo::rustc-check-cfg=cfg(libxml_older_than_2_12)");
     if older_than_2_12 {
       println!("cargo::rustc-cfg=libxml_older_than_2_12");
@@ -173,9 +193,11 @@ fn main() {
 mod vcpkg_dep {
   use crate::ProbedLib;
   pub fn vcpkg_find_libxml2() -> Option<ProbedLib> {
-    if let Ok(metadata) = vcpkg::Config::new()
-      .find_package("libxml2") {
-      Some(ProbedLib { version: vcpkg_version(), include_paths: metadata.include_paths })
+    if let Ok(metadata) = vcpkg::Config::new().find_package("libxml2") {
+      Some(ProbedLib {
+        version: vcpkg_version(),
+        include_paths: metadata.include_paths,
+      })
     } else {
       None
     }
@@ -187,7 +209,7 @@ mod vcpkg_dep {
     let mut vcpkg_exe = vcpkg::find_vcpkg_root(&vcpkg::Config::new()).unwrap();
     vcpkg_exe.push("vcpkg.exe");
     let vcpkg_list_libxml2 = std::process::Command::new(vcpkg_exe)
-      .args(["list","libxml2"])
+      .args(["list", "libxml2"])
       .output()
       .expect("vcpkg.exe failed to execute in vcpkg_dep build step");
     if vcpkg_list_libxml2.status.success() {
@@ -197,9 +219,8 @@ mod vcpkg_dep {
           let mut version_piece = line.split("2.");
           version_piece.next();
           if let Some(version_tail) = version_piece.next() {
-            if let Some(version) = version_tail.split(' ').next()
-              .unwrap().split('#').next() {
-                return format!("2.{version}");
+            if let Some(version) = version_tail.split(' ').next().unwrap().split('#').next() {
+              return format!("2.{version}");
             }
           }
         }

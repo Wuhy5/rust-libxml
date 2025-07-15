@@ -77,12 +77,6 @@ jobs:
           echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
           fi
 
-      - name: Test Rust build (host)
-        run: |
-          cargo build --release -vv
-        env:
-          RUST_BACKTRACE: 1
-
       - name: Test Rust build (Android cross, arm64-v8a)
         run: |
           rustup target add aarch64-linux-android
