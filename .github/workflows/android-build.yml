@@ -98,8 +98,8 @@ jobs:
 
           echo "✓ NDK sysroot found: $SYSROOT"
           echo "✓ stdio.h location: $(find $SYSROOT -name stdio.h | head -1)"
-
-          cargo build --target ${{ matrix.target }} --release -vv
+          cargo install cargo-ndk
+          cargo ndk -t ${{ matrix.arch }} -o ./target/${{ matrix.arch }}-android/release build --release -vv
         env:
           LIBXML2_PREBUILT_PATH: ${{ github.workspace }}/prebuilt/android-21
           ANDROID_API_LEVEL: "21"
