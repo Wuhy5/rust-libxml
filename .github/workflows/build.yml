@@ -50,11 +50,7 @@ jobs:
 
   test-rust-build:
     needs: [build-android]
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -72,22 +68,46 @@ jobs:
 
           # 设置Android库 (如果存在)
           if [ -d "artifacts/libxml2-android-arm64-v8a" ]; then
-            mkdir -p prebuilt/android-21
-            for arch in arm64-v8a armeabi-v7a x86 x86_64; do
-              if [ -d "artifacts/libxml2-android-$arch" ]; then
-                cp -r "artifacts/libxml2-android-$arch" "prebuilt/android-21/$arch"
-              fi
-            done
-            echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
+          mkdir -p prebuilt/android-21
+          for arch in arm64-v8a armeabi-v7a x86 x86_64; do
+            if [ -d "artifacts/libxml2-android-$arch" ]; then
+            cp -r "artifacts/libxml2-android-$arch" "prebuilt/android-21/$arch"
+            fi
+          done
+          echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
           fi
 
-      - name: Test Rust build
+      - name: Test Rust build (host)
         run: |
-          # 测试普通构建
-          cargo build --verbose
+          cargo build --release -vv
+        env:
+          RUST_BACKTRACE: 1
 
-          # 如果是macOS，测试iOS目标
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            rustup target add aarch64-apple-ios
-            cargo build --target aarch64-apple-ios --verbose || echo "iOS build failed (expected if cross-compilation setup incomplete)"
-          fi
+      - name: Test Rust build (Android cross, arm64-v8a)
+        run: |
+          rustup target add aarch64-linux-android
+          cargo build --target aarch64-linux-android --release -vv
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Test Rust build (Android cross, armeabi-v7a)
+        run: |
+          rustup target add armv7-linux-androideabi
+          cargo build --target armv7-linux-androideabi --release -vv
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Test Rust build (Android cross, x86)
+        run: |
+          rustup target add i686-linux-android
+          cargo build --target i686-linux-android --release -vv
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Test Rust build (Android cross, x86_64)
+        run: |
+          rustup target add x86_64-linux-android
+          cargo build --target x86_64-linux-android --release -vv
+        env:
+          RUST_BACKTRACE: 1
+          
