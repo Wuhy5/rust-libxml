@@ -5,10 +5,119 @@ struct ProbedLib {
   include_paths: Vec<PathBuf>,
 }
 
+/// 检测目标平台
+fn get_target_platform() -> String {
+  env::var("TARGET").unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// 检测是否为Android平台
+fn is_android_target() -> bool {
+  get_target_platform().contains("android")
+}
+
+/// 检测是否为iOS平台
+fn is_ios_target() -> bool {
+  let target = get_target_platform();
+  target.contains("ios") || target.contains("darwin")
+}
+
+/// 获取Android架构
+fn get_android_arch() -> Option<String> {
+  let target = get_target_platform();
+  if target.contains("aarch64") {
+    Some("arm64-v8a".to_string())
+  } else if target.contains("armv7") {
+    Some("armeabi-v7a".to_string())
+  } else if target.contains("i686") {
+    Some("x86".to_string())
+  } else if target.contains("x86_64") {
+    Some("x86_64".to_string())
+  } else {
+    None
+  }
+}
+
+/// 处理Android交叉编译
+fn handle_android_cross_compile() -> Option<ProbedLib> {
+  let arch = get_android_arch()?;
+  println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
+  println!("cargo:rerun-if-env-changed=LIBXML2_PREBUILT_PATH");
+  
+  // 检查是否有预构建的库
+  if let Ok(prebuilt_path) = env::var("LIBXML2_PREBUILT_PATH") {
+    let lib_path = PathBuf::from(&prebuilt_path).join(&arch);
+    if lib_path.join("lib").join("libxml2.a").exists() {
+      println!("cargo:rustc-link-search=native={}", lib_path.join("lib").display());
+      println!("cargo:rustc-link-lib=static=xml2");
+      return Some(ProbedLib {
+        version: "2.10.3".to_string(),
+        include_paths: vec![lib_path.join("include")],
+      });
+    }
+  }
+  
+  // 如果没有预构建库，提示用户构建
+  println!("cargo:warning=No prebuilt libxml2 found for Android {}. Please run:", arch);
+  println!("cargo:warning=  ./scripts/build_libxml2.sh --platform android --arch {} --ndk-path $ANDROID_NDK_ROOT", arch);
+  println!("cargo:warning=  export LIBXML2_PREBUILT_PATH=./prebuilt/android-21");
+  
+  None
+}
+
+/// 处理iOS交叉编译
+fn handle_ios_cross_compile() -> Option<ProbedLib> {
+  println!("cargo:rerun-if-env-changed=LIBXML2_IOS_PATH");
+  
+  // 检查是否有预构建的iOS库
+  if let Ok(ios_path) = env::var("LIBXML2_IOS_PATH") {
+    let lib_path = PathBuf::from(&ios_path);
+    if lib_path.join("lib").join("libxml2.a").exists() {
+      println!("cargo:rustc-link-search=native={}", lib_path.join("lib").display());
+      println!("cargo:rustc-link-lib=static=xml2");
+      return Some(ProbedLib {
+        version: "2.10.3".to_string(),
+        include_paths: vec![lib_path.join("include")],
+      });
+    }
+  }
+  
+  // 使用系统pkg-config（如果可用）
+  #[cfg(target_os = "macos")]
+  {
+    if let Ok(lib) = pkg_config::Config::new().probe("libxml-2.0") {
+      return Some(ProbedLib {
+        include_paths: lib.include_paths,
+        version: lib.version,
+      });
+    }
+  }
+  
+  // 如果没有预构建库，提示用户构建
+  println!("cargo:warning=No prebuilt libxml2 found for iOS. Please run:");
+  println!("cargo:warning=  ./scripts/build_libxml2.sh --platform ios --arch arm64");
+  println!("cargo:warning=  ./scripts/build_libxml2.sh --platform ios --arch x86_64");
+  println!("cargo:warning=  export LIBXML2_IOS_PATH=./prebuilt/ios/universal");
+  
+  None
+}
+
 /// Finds libxml2 and optionally return a list of header
 /// files from which the bindings can be generated.
 fn find_libxml2() -> Option<ProbedLib> {
   #![allow(unreachable_code)] // for platform-dependent dead code
+
+  // 首先检查交叉编译环境
+  if is_android_target() {
+    if let Some(lib) = handle_android_cross_compile() {
+      return Some(lib);
+    }
+  }
+  
+  if is_ios_target() {
+    if let Some(lib) = handle_ios_cross_compile() {
+      return Some(lib);
+    }
+  }
 
   if let Ok(ref s) = std::env::var("LIBXML2") {
     // println!("{:?}", std::env::vars());

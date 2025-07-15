@@ -1,0 +1,211 @@
+name: Build libxml2 Cross-Platform
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64-v8a, armeabi-v7a, x86, x86_64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
+      - name: Build libxml2 for Android
+        run: |
+          chmod +x scripts/build_libxml2.sh
+          ./scripts/build_libxml2.sh \
+            --platform android \
+            --arch ${{ matrix.arch }} \
+            --ndk-path $ANDROID_NDK_ROOT \
+            --api-level 21 \
+            --src-dir ./build/src \
+            --install-dir ./prebuilt/android-21
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libxml2-android-${{ matrix.arch }}
+          path: prebuilt/android-21/${{ matrix.arch }}
+          retention-days: 30
+
+  build-ios:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build libxml2 for iOS
+        run: |
+          chmod +x scripts/build_libxml2.sh
+          ./scripts/build_libxml2.sh \
+            --platform ios \
+            --arch ${{ matrix.arch }} \
+            --src-dir ./build/src \
+            --install-dir ./prebuilt/ios
+
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libxml2-ios-${{ matrix.arch }}
+          path: prebuilt/ios/${{ matrix.arch }}
+          retention-days: 30
+
+  create-release:
+    if: github.event_name == 'release'
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create prebuilt package
+        run: |
+          mkdir -p prebuilt-libxml2
+
+          # 组织Android库
+          mkdir -p prebuilt-libxml2/android-21
+          for arch in arm64-v8a armeabi-v7a x86 x86_64; do
+            if [ -d "artifacts/libxml2-android-$arch" ]; then
+              cp -r "artifacts/libxml2-android-$arch" "prebuilt-libxml2/android-21/$arch"
+            fi
+          done
+
+          # 组织iOS库
+          mkdir -p prebuilt-libxml2/ios
+          for arch in arm64 x86_64; do
+            if [ -d "artifacts/libxml2-ios-$arch" ]; then
+              cp -r "artifacts/libxml2-ios-$arch" "prebuilt-libxml2/ios/$arch"
+            fi
+          done
+
+          # 创建通用iOS库
+          if [ -f "prebuilt-libxml2/ios/arm64/lib/libxml2.a" ] && [ -f "prebuilt-libxml2/ios/x86_64/lib/libxml2.a" ]; then
+            mkdir -p prebuilt-libxml2/ios/universal/lib
+            mkdir -p prebuilt-libxml2/ios/universal/include
+            cp -r prebuilt-libxml2/ios/arm64/include/* prebuilt-libxml2/ios/universal/include/
+            lipo -create \
+              prebuilt-libxml2/ios/arm64/lib/libxml2.a \
+              prebuilt-libxml2/ios/x86_64/lib/libxml2.a \
+              -output prebuilt-libxml2/ios/universal/lib/libxml2.a
+          fi
+
+          # 创建README
+          cat > prebuilt-libxml2/README.md << 'EOF'
+          # Prebuilt libxml2 Libraries
+
+          This package contains prebuilt libxml2 libraries for cross-platform development.
+
+          ## Android
+
+          Libraries for Android API level 21+ in `android-21/` directory:
+          - `arm64-v8a/` - ARM64 architecture
+          - `armeabi-v7a/` - ARM v7a architecture  
+          - `x86/` - x86 architecture
+          - `x86_64/` - x86_64 architecture
+
+          ## iOS
+
+          Libraries for iOS in `ios/` directory:
+          - `arm64/` - ARM64 architecture (device)
+          - `x86_64/` - x86_64 architecture (simulator)
+          - `universal/` - Universal/Fat binary (device + simulator)
+
+          ## Usage
+
+          Set environment variables to use these libraries:
+
+          ```bash
+          # For Android
+          export LIBXML2_PREBUILT_PATH="/path/to/prebuilt-libxml2/android-21"
+
+          # For iOS
+          export LIBXML2_IOS_PATH="/path/to/prebuilt-libxml2/ios/universal"
+          ```
+          EOF
+
+          # 创建压缩包
+          tar -czf prebuilt-libxml2.tar.gz prebuilt-libxml2/
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: prebuilt-libxml2.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-rust-build:
+    needs: [build-android, build-ios]
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Setup prebuilt libraries
+        run: |
+          mkdir -p prebuilt
+
+          # 设置Android库 (如果存在)
+          if [ -d "artifacts/libxml2-android-arm64-v8a" ]; then
+            mkdir -p prebuilt/android-21
+            for arch in arm64-v8a armeabi-v7a x86 x86_64; do
+              if [ -d "artifacts/libxml2-android-$arch" ]; then
+                cp -r "artifacts/libxml2-android-$arch" "prebuilt/android-21/$arch"
+              fi
+            done
+            echo "LIBXML2_PREBUILT_PATH=$(pwd)/prebuilt/android-21" >> $GITHUB_ENV
+          fi
+
+          # 设置iOS库 (如果存在且在macOS上)
+          if [ "${{ matrix.os }}" = "macos-latest" ] && [ -d "artifacts/libxml2-ios-arm64" ]; then
+            mkdir -p prebuilt/ios/universal/lib
+            mkdir -p prebuilt/ios/universal/include
+            cp -r artifacts/libxml2-ios-arm64/include/* prebuilt/ios/universal/include/
+            lipo -create \
+              artifacts/libxml2-ios-arm64/lib/libxml2.a \
+              artifacts/libxml2-ios-x86_64/lib/libxml2.a \
+              -output prebuilt/ios/universal/lib/libxml2.a
+            echo "LIBXML2_IOS_PATH=$(pwd)/prebuilt/ios/universal" >> $GITHUB_ENV
+          fi
+
+      - name: Test Rust build
+        run: |
+          # 测试普通构建
+          cargo build --verbose
+
+          # 如果是macOS，测试iOS目标
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            rustup target add aarch64-apple-ios
+            cargo build --target aarch64-apple-ios --verbose || echo "iOS build failed (expected if cross-compilation setup incomplete)"
+          fi
