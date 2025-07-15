@@ -1,6 +1,6 @@
 #!/bin/bash
 # 构建libxml2的交叉编译脚本
-# 支持Android和iOS平台
+# 仅支持Android平台
 
 set -e
 
@@ -30,7 +30,7 @@ log_error() {
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "Options:"
-    echo "  -p, --platform PLATFORM    Target platform (android|ios)"
+    echo "  -p, --platform PLATFORM    Target platform (android)"
     echo "  -a, --arch ARCH            Target architecture"
     echo "  -n, --ndk-path PATH        Path to Android NDK (required for Android)"
     echo "  -l, --api-level LEVEL      Android API level (default: 21)"
@@ -39,11 +39,9 @@ usage() {
     echo "  -h, --help                 Show this help message"
     echo ""
     echo "Android architectures: arm64-v8a, armeabi-v7a, x86, x86_64"
-    echo "iOS architectures: arm64, x86_64"
     echo ""
     echo "Examples:"
     echo "  $0 -p android -a arm64-v8a -n /path/to/ndk"
-    echo "  $0 -p ios -a arm64"
 }
 
 # 解析命令行参数
@@ -198,7 +196,8 @@ build_android() {
     fi
 
     local libxml2_src="$src_dir/libxml2"
-    local arch_install_dir="$(realpath "$install_dir/$arch")"
+    local arch_install_dir
+    arch_install_dir="$(cd "$install_dir/$arch" && pwd)"
 
     # 确保安装目录存在
     mkdir -p "$arch_install_dir"
@@ -251,110 +250,6 @@ build_android() {
     return 0
 }
 
-build_ios() {
-    local arch="$1"
-    local src_dir="$2"
-    local install_dir="$3"
-
-    log_info "Building libxml2 for iOS $arch..."
-
-    # iOS SDK 路径
-    local ios_sdk_path
-    case "$arch" in
-    arm64)
-        ios_sdk_path="$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")"
-        ;;
-    x86_64)
-        ios_sdk_path="$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null || echo "")"
-        ;;
-    *)
-        log_error "Unsupported iOS architecture: $arch"
-        return 1
-        ;;
-    esac
-
-    if [[ -z "$ios_sdk_path" || ! -d "$ios_sdk_path" ]]; then
-        log_error "iOS SDK not found for $arch"
-        return 1
-    fi
-
-    # 设置编译器和标志
-    local min_ios_version="9.0"
-    local target_triple
-    case "$arch" in
-    arm64)
-        target_triple="arm64-apple-ios"
-        ;;
-    x86_64)
-        target_triple="x86_64-apple-ios-simulator"
-        ;;
-    esac
-
-    # 设置环境变量
-    export CC="$(xcrun --find clang)"
-    export CXX="$(xcrun --find clang++)"
-    export AR="$(xcrun --find ar)"
-    export RANLIB="$(xcrun --find ranlib)"
-    export STRIP="$(xcrun --find strip)"
-
-    export CFLAGS="-arch $arch -isysroot $ios_sdk_path -miphoneos-version-min=$min_ios_version"
-    export CXXFLAGS="$CFLAGS"
-    export LDFLAGS="-arch $arch -isysroot $ios_sdk_path -miphoneos-version-min=$min_ios_version"
-
-    local libxml2_src="$src_dir/libxml2"
-    local arch_install_dir="$(realpath "$install_dir/$arch")"
-
-    # 确保安装目录存在
-    mkdir -p "$arch_install_dir"
-
-    # 进入源码目录
-    cd "$libxml2_src"
-
-    # 清理之前的构建
-    if [[ -f "Makefile" ]]; then
-        make distclean || true
-    fi
-
-    log_info "Configuring libxml2 for iOS $arch..."
-
-    # 配置构建
-    if ! ./autogen.sh \
-        --host="$target_triple" \
-        --prefix="$arch_install_dir" \
-        --with-pic \
-        --disable-shared \
-        --without-iconv \
-        --without-python \
-        --without-zlib \
-        --without-lzma \
-        --without-http \
-        --without-ftp \
-        --without-debug \
-        --without-catalog; then
-        log_error "Configuration failed for iOS $arch"
-        return 1
-    fi
-
-    log_info "Building libxml2 for iOS $arch..."
-
-    # 编译
-    if ! make -j$(sysctl -n hw.ncpu 2>/dev/null || echo 4); then
-        log_error "Build failed for iOS $arch"
-        return 1
-    fi
-
-    log_info "Installing libxml2 for iOS $arch..."
-
-    # 安装
-    if ! make install; then
-        log_error "Installation failed for iOS $arch"
-        return 1
-    fi
-
-    log_info "Successfully built libxml2 for iOS $arch"
-    return 0
-}
-
 # 主函数
 main() {
     log_info "Starting libxml2 cross-compilation for $PLATFORM $ARCH"
@@ -365,36 +260,15 @@ main() {
         exit 1
     fi
 
-    # 根据平台构建
-    case "$PLATFORM" in
-    android)
-        if [[ -z "$NDK_PATH" ]]; then
-            log_error "Android NDK path is required for Android builds"
-            exit 1
-        fi
-
-        if ! build_android "$ARCH" "$NDK_PATH" "$API_LEVEL" "$SRC_DIR" "$INSTALL_DIR"; then
-            log_error "Failed to build libxml2 for Android $ARCH"
-            exit 1
-        fi
-        ;;
-    ios)
-        if [[ "$(uname -s)" != "Darwin" ]]; then
-            log_error "iOS builds are only supported on macOS"
-            exit 1
-        fi
-
-        if ! build_ios "$ARCH" "$SRC_DIR" "$INSTALL_DIR"; then
-            log_error "Failed to build libxml2 for iOS $ARCH"
-            exit 1
-        fi
-        ;;
-    *)
-        log_error "Unsupported platform: $PLATFORM"
+    if [[ -z "$NDK_PATH" ]]; then
+        log_error "Android NDK path is required for Android builds"
         exit 1
-        ;;
-    esac
+    fi
 
+    if ! build_android "$ARCH" "$NDK_PATH" "$API_LEVEL" "$SRC_DIR" "$INSTALL_DIR"; then
+        log_error "Failed to build libxml2 for Android $ARCH"
+        exit 1
+    fi
     log_info "Build completed successfully!"
     log_info "Installation directory: $INSTALL_DIR/$ARCH"
 }
