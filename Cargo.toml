@@ -16,6 +16,7 @@ exclude = [
 
 [lib]
 name = "libxml"
+crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 libc = "0.2"
