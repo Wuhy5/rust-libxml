@@ -39,6 +39,11 @@ features = [
 ]
 default-features = false
 
+# Helpers for lazy building/downloading when cross-compiling (Android/iOS)
+[build-dependencies]
+cmake = "0.1"
+which = "8"
+
 [dev-dependencies]
 rayon = "1.0.0"
 criterion = "0.7.0"
