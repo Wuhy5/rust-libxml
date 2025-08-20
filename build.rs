@@ -1,252 +1,425 @@
+// build.rs
+
 use std::{
   env, fs,
   path::{Path, PathBuf},
   process::Command,
 };
 
+/// Represents the information of a found libxml2 library.
 struct ProbedLib {
+  /// Library version string.
   version: String,
+  /// Header search paths.
   include_paths: Vec<PathBuf>,
-  // Extra clang args to pass to bindgen (e.g. target/sysroot/defines)
+  /// Extra clang arguments to pass to bindgen.
   clang_args: Vec<String>,
 }
 
-/// Finds libxml2 and optionally return a list of header
-/// files from which the bindings can be generated.
-fn find_libxml2() -> Option<ProbedLib> {
-  #![allow(unreachable_code)] // for platform-dependent dead code
+fn main() {
+  let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
+  let bindings_path = out_dir.join("bindings.rs");
 
-  if let Ok(ref s) = std::env::var("LIBXML2") {
-    // println!("{:?}", std::env::vars());
-    // panic!("set libxml2.");
-    let p = std::path::Path::new(s);
-    let fname = std::path::Path::new(
-      p.file_name()
-        .unwrap_or_else(|| panic!("no file name in LIBXML2 env ({s})")),
+  // Pre-declare the custom cfg flag to inform Cargo about its existence.
+  println!("cargo:rustc-check-cfg=cfg(libxml_older_than_2_12)");
+  // Rerun this script if environment variables or source files change.
+  println!("cargo:rerun-if-env-changed=LIBXML2");
+  println!("cargo:rerun-if-changed=src/wrapper.h");
+  println!("cargo:rerun-if-changed=src/default_bindings.rs");
+
+  if let Some(probed_lib) = find_libxml2() {
+    // If a library is found, generate fresh bindings from its headers.
+    generate_bindings(
+      &probed_lib.include_paths,
+      &probed_lib.clang_args,
+      &bindings_path,
     );
-    assert!(
-      p.is_file(),
-      "{}",
-      &format!("not a file in LIBXML2 env ({s})")
-    );
-    println!(
-      "cargo:rustc-link-lib={}",
-      fname
-        .file_stem()
-        .unwrap()
-        .to_string_lossy()
-        .strip_prefix("lib")
-        .unwrap()
-    );
-    println!(
-      "cargo:rustc-link-search={}",
-      p.parent()
-        .expect("no library path in LIBXML2 env")
-        .to_string_lossy()
-    );
-    None
+
+    // Expose the library version to the code for conditional compilation.
+    // Parse the version string, e.g., "2.13.5" -> [2, 13, 5].
+    let version_parts: Vec<u32> = probed_lib
+      .version
+      .split('.')
+      .map(|part| part.parse().unwrap_or(0))
+      .collect();
+
+    // Check if the version is older than 2.12.
+    if version_parts.len() >= 2
+      && (version_parts[0] < 2 || (version_parts[0] == 2 && version_parts[1] < 12))
+    {
+      println!("cargo:rustc-cfg=libxml_older_than_2_12");
+    }
   } else {
-    let target = env::var("TARGET").unwrap_or_default();
-
-    // Android: try NDK + CMake lazy build of libxml2
-    if target.contains("android") {
-      println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
-      println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
-      let ndk = env::var("ANDROID_NDK_ROOT").or_else(|_| env::var("ANDROID_NDK_HOME"));
-      let ndk_root = match ndk {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => panic!("Android target detected, but ANDROID_NDK_ROOT/ANDROID_NDK_HOME not set"),
-      };
-      // Early check for cmake presence to provide clearer diagnostics
-      if which::which("cmake").is_err() {
-        panic!(
-          "CMake not found. Please install CMake and ensure it's on PATH (Windows: install from cmake.org and reopen the terminal; Linux: apt/dnf/pacman install). Optional but recommended: install Ninja."
-        );
-      }
-      let api_level = env::var("ANDROID_PLATFORM")
-        .ok()
-        .and_then(|v| v.trim_start_matches("android-").parse::<u32>().ok())
-        .unwrap_or(21);
-      let (android_abi, clang_target) = map_android_abi_and_target(&target, api_level)
-        .unwrap_or_else(|| panic!("Unsupported Android target triple: {target}"));
-      let host_tag = ndk_host_tag();
-      // Compute NDK sysroot for bindgen
-      let sysroot = ndk_root
-        .join("toolchains/llvm/prebuilt")
-        .join(&host_tag)
-        .join("sysroot");
-
-      // auto set CC/CXX environment variables
-      let bin_dir = ndk_root
-        .join("toolchains/llvm/prebuilt")
-        .join(&host_tag)
-        .join("bin");
-      let cc_path = bin_dir.join(format!("{}-clang.cmd", clang_target));
-      let cxx_path = bin_dir.join(format!("{}-clang++.cmd", clang_target));
-      if cc_path.exists() && cxx_path.exists() {
-        unsafe {
-          env::set_var("CC", &cc_path);
-          env::set_var("CXX", &cxx_path);
-        }
-      }
-
-      let (dst, include_dir) =
-        build_libxml2_android(&ndk_root, &host_tag, android_abi, &clang_target, api_level);
-
-      // Link to the freshly built static libxml2
-      println!(
-        "cargo:rustc-link-search=native={}",
-        dst.join("lib").display()
-      );
-      println!("cargo:rustc-link-lib=static=xml2");
-
-      let mut clang_args = vec![
-        format!("--target={}", clang_target),
-        String::from("-D__ANDROID__"),
-      ];
-      // libxml2 headers
-      clang_args.push(format!("-I{}", include_dir.display()));
-      if sysroot.exists() {
-        // Prefer combined form for reliability on Windows
-        clang_args.push(format!("--sysroot={}", sysroot.display()));
-        // Also add common include roots under sysroot
-        let sys_inc = sysroot.join("usr/include");
-        if sys_inc.exists() {
-          clang_args.push(format!("-I{}", sys_inc.display()));
-        }
-        // Arch-specific headers
-        let arch = arch_triple_for_sysroot(&clang_target);
-        let arch_inc = sys_inc.join(&arch);
-        if arch_inc.exists() {
-          clang_args.push(format!("-I{}", arch_inc.display()));
-        }
-      }
-
-      return Some(ProbedLib {
-        include_paths: vec![include_dir],
-        version: String::from("2.13.0"),
-        clang_args,
-      });
-    }
-
-    // iOS (only supported on macOS hosts): use SDK-provided libxml2
-    if target.contains("apple-ios") {
-      // Only allow on macOS hosts
-      let host = env::var("HOST").unwrap_or_default();
-      if !host.contains("apple-darwin") {
-        panic!("iOS builds are only supported on macOS hosts");
-      }
-      let is_sim = target.contains("-sim");
-      let sdk = if is_sim {
-        "iphonesimulator"
-      } else {
-        "iphoneos"
-      };
-      let sdk_path = xcrun_sdk_path(sdk).expect("Failed to resolve iOS SDK via xcrun");
-      let include_dir = sdk_path.join("usr/include/libxml2");
-      let lib_dir = sdk_path.join("usr/lib");
-
-      // Link against the SDK's libxml2.tbd
-      println!("cargo:rustc-link-search=native={}", lib_dir.display());
-      println!("cargo:rustc-link-lib=xml2");
-
-      let mut clang_target = target.replace("-apple-ios-sim", "-apple-ios-simulator");
-      if target == "aarch64-apple-ios" {
-        clang_target = "arm64-apple-ios".to_string();
-      }
-      let clang_args = vec![
-        format!("--target={}", clang_target),
-        format!("-isysroot"),
-        sdk_path.display().to_string(),
-        format!("-I{}", include_dir.display()),
-      ];
-
-      return Some(ProbedLib {
-        include_paths: vec![include_dir],
-        version: String::from("2.13.0"),
-        clang_args,
-      });
-    }
-
-    #[cfg(any(
-      target_family = "unix",
-      target_os = "macos",
-      all(target_family = "windows", target_env = "gnu")
-    ))]
-    {
-      let lib = pkg_config::Config::new()
-        .probe("libxml-2.0")
-        .expect("Couldn't find libxml2 via pkg-config");
-      return Some(ProbedLib {
-        include_paths: lib.include_paths,
-        version: lib.version,
-        clang_args: vec![],
-      });
-    }
-
-    #[cfg(all(target_family = "windows", target_env = "msvc"))]
-    {
-      if let Some(meta) = vcpkg_dep::vcpkg_find_libxml2() {
-        return Some(meta);
-      } else {
-        eprintln!("vcpkg did not succeed in finding libxml2.");
-      }
-    }
-
-    panic!("Could not find libxml2.")
+    // If the library is not found (e.g., on MSVC without pkg-config), use pre-generated default bindings.
+    fs::copy("src/default_bindings.rs", bindings_path)
+      .expect("Failed to copy the default bindings to the build directory");
+    // The default bindings are based on an older version, so we assume it's older than 2.12.
+    println!("cargo:rustc-cfg=libxml_older_than_2_12");
   }
 }
 
-// Resolve iOS SDK path via xcrun
+/// Finds the libxml2 library and returns its metadata.
+///
+/// The search strategy priority is:
+/// 1. `LIBXML2` environment variable (all platforms).
+/// 2. Platform-specific search:
+///    - Android: Build from source using the NDK.
+///    - iOS: Use the library from the Xcode SDK.
+///    - Windows (MSVC): Use vcpkg.
+///    - Unix-like (including Windows GNU): Use pkg-config.
+fn find_libxml2() -> Option<ProbedLib> {
+  // 1. First, check the `LIBXML2` environment variable.
+  if let Ok(lib_path_str) = env::var("LIBXML2") {
+    let lib_path = PathBuf::from(lib_path_str);
+    if !lib_path.is_file() {
+      panic!(
+        "LIBXML2 environment variable points to a non-file path: {}",
+        lib_path.display()
+      );
+    }
+
+    let lib_dir = lib_path
+      .parent()
+      .unwrap_or_else(|| Path::new("/"))
+      .to_string_lossy();
+    let lib_name = lib_path
+      .file_stem()
+      .and_then(|s| s.to_str())
+      .and_then(|s| s.strip_prefix("lib"))
+      .unwrap_or_else(|| {
+        panic!(
+          "Could not determine library name from LIBXML2 path: {}",
+          lib_path.display()
+        )
+      });
+
+    println!("cargo:rustc-link-search={}", lib_dir);
+    println!("cargo:rustc-link-lib={}", lib_name);
+
+    // When using the `LIBXML2` env var, we can't easily determine the version and include paths,
+    // so we return `None` to use the pre-generated bindings.
+    // The user must ensure headers are in the system path.
+    return None;
+  }
+
+  // 2. Otherwise, perform a platform-specific search.
+  let target = env::var("TARGET").expect("TARGET environment variable not set");
+
+  if target.contains("android") {
+    return find_libxml2_for_android(&target);
+  }
+
+  if target.contains("apple-ios") {
+    return find_libxml2_for_ios(&target);
+  }
+
+  // For non-Android and non-iOS platforms, dispatch using cfg attributes.
+  find_libxml2_via_pkgmgr()
+}
+
+#[cfg(any(
+  target_family = "unix",
+  target_os = "macos",
+  all(target_family = "windows", target_env = "gnu")
+))]
+fn find_libxml2_via_pkgmgr() -> Option<ProbedLib> {
+  // For Unix-like systems and Windows GNU, use pkg-config.
+  match pkg_config::Config::new().probe("libxml-2.0") {
+    Ok(lib) => Some(ProbedLib {
+      include_paths: lib.include_paths,
+      version: lib.version,
+      clang_args: Vec::new(),
+    }),
+    Err(e) => {
+      panic!("Could not find libxml2 using pkg-config: {}", e);
+    }
+  }
+}
+
+#[cfg(all(target_family = "windows", target_env = "msvc"))]
+mod vcpkg_dep {
+  use super::ProbedLib;
+  use std::process::Command;
+
+  // Finds libxml2 via vcpkg.
+  pub fn find_libxml2() -> Option<ProbedLib> {
+    vcpkg::Config::new()
+      .find_package("libxml2")
+      .map(|metadata| ProbedLib {
+        version: get_vcpkg_package_version("libxml2").unwrap_or_else(|| "2.13.5".to_string()),
+        include_paths: metadata.include_paths,
+        clang_args: vec![],
+      })
+      .ok()
+  }
+
+  // Gets the package version by calling the `vcpkg list` command.
+  fn get_vcpkg_package_version(pkg_name: &str) -> Option<String> {
+    let vcpkg_root = vcpkg::find_vcpkg_root(&vcpkg::Config::new()).ok()?;
+    let vcpkg_exe = vcpkg_root.join("vcpkg.exe");
+
+    let output = Command::new(vcpkg_exe)
+      .args(["list", pkg_name])
+      .output()
+      .ok()?;
+
+    if !output.status.success() {
+      return None;
+    }
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    // vcpkg output format is like: `libxml2:x64-windows         2.13.5#1         GNOME's XML parser and toolkit`.
+    // We need to extract `2.13.5` from this.
+    for line in output_str.lines() {
+      if line.starts_with(pkg_name) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 2 {
+          return parts[1].split('#').next().map(String::from);
+        }
+      }
+    }
+    None
+  }
+}
+
+#[cfg(all(target_family = "windows", target_env = "msvc"))]
+fn find_libxml2_via_pkgmgr() -> Option<ProbedLib> {
+  // For Windows MSVC, use vcpkg.
+  if let Some(lib) = vcpkg_dep::find_libxml2() {
+    return Some(lib);
+  }
+  eprintln!("Could not find libxml2 via vcpkg. Please install it using: `vcpkg install libxml2`");
+  None
+}
+
+#[cfg(not(any(
+  target_family = "unix",
+  target_os = "macos",
+  all(target_family = "windows", target_env = "gnu"),
+  all(target_family = "windows", target_env = "msvc")
+)))]
+fn find_libxml2_via_pkgmgr() -> Option<ProbedLib> {
+  // For other unsupported platforms, fail the build.
+  panic!("Unsupported platform: Could not find a suitable method to locate libxml2.");
+}
+
+/// Finds libxml2 for iOS.
+fn find_libxml2_for_ios(target: &str) -> Option<ProbedLib> {
+  // iOS builds are only supported on macOS hosts.
+  if !cfg!(target_os = "macos") {
+    panic!("iOS builds are only supported on macOS hosts");
+  }
+
+  let sdk = if target.contains("-sim") {
+    "iphonesimulator"
+  } else {
+    "iphoneos"
+  };
+
+  let sdk_path = xcrun_sdk_path(sdk)
+    .unwrap_or_else(|| panic!("Failed to resolve iOS SDK path for '{}' via xcrun", sdk));
+  let include_dir = sdk_path.join("usr/include/libxml2");
+  let lib_dir = sdk_path.join("usr/lib");
+
+  println!("cargo:rustc-link-search=native={}", lib_dir.display());
+  println!("cargo:rustc-link-lib=xml2");
+
+  let clang_target = match target {
+    "aarch64-apple-ios" => "arm64-apple-ios".to_string(),
+    "aarch64-apple-ios-sim" => "arm64-apple-ios-simulator".to_string(),
+    t if t.contains("-sim") => t.replace("-apple-ios-sim", "-apple-ios-simulator"),
+    _ => target.to_string(),
+  };
+
+  let clang_args = vec![
+    format!("--target={}", clang_target),
+    "-isysroot".to_string(),
+    sdk_path.display().to_string(),
+    format!("-I{}", include_dir.display()),
+  ];
+
+  Some(ProbedLib {
+    // It's not easy to get the version from the iOS SDK, so we hardcode a known compatible version here.
+    version: "2.9.13".to_string(),
+    include_paths: vec![include_dir],
+    clang_args,
+  })
+}
+
+/// Gets the iOS SDK path via `xcrun`.
 fn xcrun_sdk_path(sdk: &str) -> Option<PathBuf> {
   let out = Command::new("xcrun")
     .args(["--sdk", sdk, "--show-sdk-path"])
     .output()
     .ok()?;
+
   if !out.status.success() {
     return None;
   }
-  let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-  if s.is_empty() {
+
+  let binding = String::from_utf8_lossy(&out.stdout);
+  let path_str = binding.trim();
+  if path_str.is_empty() {
     None
   } else {
-    Some(PathBuf::from(s))
+    Some(PathBuf::from(path_str))
   }
 }
 
-// Map Android Rust target triple to (ABI, clang target with API level)
-fn map_android_abi_and_target(target: &str, api: u32) -> Option<(&'static str, String)> {
-  let t = if let Some(stripped) = target.strip_suffix("eabi") {
-    stripped
-  } else {
-    target
-  };
-  match t {
-    "aarch64-linux-android" => Some(("arm64-v8a", format!("aarch64-linux-android{}", api))),
-    "armv7-linux-android" | "armv7-linux-androideabi" => {
-      Some(("armeabi-v7a", format!("armv7a-linux-androideabi{}", api)))
+/// Finds and builds libxml2 for Android.
+fn find_libxml2_for_android(target: &str) -> Option<ProbedLib> {
+  println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
+  println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+
+  let ndk_root = env::var("ANDROID_NDK_ROOT")
+    .or_else(|_| env::var("ANDROID_NDK_HOME"))
+    .map(PathBuf::from)
+    .expect("Android target detected, but ANDROID_NDK_ROOT or ANDROID_NDK_HOME is not set.");
+
+  // Ensure cmake is available.
+  if which::which("cmake").is_err() {
+    panic!("CMake not found. Please install CMake and ensure it is on your PATH.");
+  }
+
+  let api_level = env::var("ANDROID_PLATFORM")
+    .ok()
+    .and_then(|v| v.trim_start_matches("android-").parse::<u32>().ok())
+    .unwrap_or(21);
+
+  let (android_abi, clang_target) = map_android_target(target, api_level)
+    .unwrap_or_else(|| panic!("Unsupported Android target triple: {}", target));
+
+  let host_tag = get_ndk_host_tag();
+
+  // auto set CC/CXX environment variables
+  let bin_dir = ndk_root
+    .join("toolchains/llvm/prebuilt")
+    .join(host_tag)
+    .join("bin");
+
+  let cc_path = {
+    let mut path = bin_dir.join(format!("{}-clang", clang_target));
+    if cfg!(target_os = "windows") {
+      path.set_extension("cmd");
     }
-    "i686-linux-android" => Some(("x86", format!("i686-linux-android{}", api))),
-    "x86_64-linux-android" => Some(("x86_64", format!("x86_64-linux-android{}", api))),
-    _ => None,
+    path
+  };
+
+  let cxx_path = {
+    let mut path = bin_dir.join(format!("{}-clang++", clang_target));
+    if cfg!(target_os = "windows") {
+      path.set_extension("cmd");
+    }
+    path
+  };
+
+  if cc_path.exists() && cxx_path.exists() {
+    unsafe {
+      env::set_var("CC", &cc_path);
+      env::set_var("CXX", &cxx_path);
+    }
+  } else {
+    // Provide a clearer error if the expected compilers are not found.
+    panic!(
+      "Could not find NDK compilers. Checked for: {} and {}",
+      cc_path.display(),
+      cxx_path.display()
+    );
+  }
+
+  // Build libxml2.
+  let (dst, include_dir) = build_libxml2_for_android(&ndk_root, android_abi, api_level);
+
+  // Link against the static library.
+  println!(
+    "cargo:rustc-link-search=native={}",
+    dst.join("lib").display()
+  );
+  println!("cargo:rustc-link-lib=static=xml2");
+
+  // Configure clang arguments for bindgen.
+  let sysroot = ndk_root
+    .join("toolchains/llvm/prebuilt")
+    .join(host_tag)
+    .join("sysroot");
+  let mut clang_args = vec![
+    format!("--target={}", clang_target),
+    "-D__ANDROID__".to_string(),
+    format!("-I{}", include_dir.display()),
+  ];
+  if sysroot.exists() {
+    clang_args.push(format!("--sysroot={}", sysroot.display()));
+    let sys_inc = sysroot.join("usr/include");
+    if sys_inc.exists() {
+      clang_args.push(format!("-I{}", sys_inc.display()));
+      // Add arch-specific include path.
+      let arch_inc = sys_inc.join(map_clang_target_to_sysroot_arch(&clang_target));
+      if arch_inc.exists() {
+        clang_args.push(format!("-I{}", arch_inc.display()));
+      }
+    }
+  }
+
+  Some(ProbedLib {
+    version: "2.13.5".to_string(), // Version from the source build.
+    include_paths: vec![include_dir],
+    clang_args,
+  })
+}
+
+/// Maps a Rust Android target triple to an NDK ABI and a clang target string.
+fn map_android_target(target: &str, api: u32) -> Option<(&'static str, String)> {
+  let (abi, clang_triple) = match target {
+    "aarch64-linux-android" => ("arm64-v8a", "aarch64-linux-android"),
+    "armv7-linux-androideabi" => ("armeabi-v7a", "armv7a-linux-androideabi"),
+    "i686-linux-android" => ("x86", "i686-linux-android"),
+    "x86_64-linux-android" => ("x86_64", "x86_64-linux-android"),
+    _ => return None,
+  };
+  Some((abi, format!("{}{}", clang_triple, api)))
+}
+
+/// Gets the NDK host tag for the current host OS (e.g., "linux-x86_64").
+fn get_ndk_host_tag() -> &'static str {
+  if cfg!(target_os = "linux") {
+    "linux-x86_64"
+  } else if cfg!(target_os = "windows") {
+    "windows-x86_64"
+  } else if cfg!(target_os = "macos") {
+    if cfg!(target_arch = "aarch64") {
+      "darwin-arm64"
+    } else {
+      "darwin-x86_64"
+    }
+  } else {
+    panic!("Unsupported host OS for Android NDK");
   }
 }
 
-// Clone and build libxml2 for Android using CMake + NDK toolchain
-fn build_libxml2_android(
-  ndk_root: &Path,
-  host_tag: &str,
-  abi: &str,
-  clang_target: &str,
-  api: u32,
-) -> (PathBuf, PathBuf) {
-  // Prepare paths
+/// Maps a clang target to the corresponding architecture directory name in the NDK sysroot.
+fn map_clang_target_to_sysroot_arch(clang_target: &str) -> &'static str {
+  if clang_target.starts_with("aarch64-") {
+    "aarch64-linux-android"
+  } else if clang_target.starts_with("armv7") {
+    "arm-linux-androideabi"
+  } else if clang_target.starts_with("i686-") {
+    "i686-linux-android"
+  } else if clang_target.starts_with("x86_64-") {
+    "x86_64-linux-android"
+  } else {
+    panic!("Unknown clang target for sysroot mapping: {}", clang_target);
+  }
+}
+
+/// Builds libxml2 for Android using CMake and the NDK.
+fn build_libxml2_for_android(ndk_root: &Path, abi: &str, api: u32) -> (PathBuf, PathBuf) {
   let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
   let src_dir = out_dir.join("libxml2-src");
-  let repo_url =
-    env::var("LIBXML2_GIT").unwrap_or_else(|_| "https://github.com/GNOME/libxml2.git".to_string());
+
+  // Clone the libxml2 repository if it doesn't exist.
   if !src_dir.exists() {
-    // Shallow clone for speed
+    let repo_url = env::var("LIBXML2_GIT")
+      .unwrap_or_else(|_| "https://github.com/GNOME/libxml2.git".to_string());
     let status = Command::new("git")
       .args([
         "clone",
@@ -255,252 +428,89 @@ fn build_libxml2_android(
         "--branch",
         "v2.13.5",
         &repo_url,
-        src_dir.to_string_lossy().as_ref(),
+        src_dir.to_str().unwrap(),
       ])
       .status()
-      .expect("failed to spawn git");
+      .expect("Failed to execute git. Is it installed and in PATH?");
     if !status.success() {
-      panic!("git clone of libxml2 failed");
+      panic!("'git clone' of libxml2 failed with status: {}", status);
     }
   }
 
-  // 自动清理 CMakeCache.txt 和 CMakeFiles/，防止 cache 污染
+  // remove CMake cache
   let build_dir = out_dir.join("build");
-  let cache_file = build_dir.join("CMakeCache.txt");
-  if cache_file.exists() {
-    let _ = std::fs::remove_file(&cache_file);
-  }
-  let cmakefiles_dir = build_dir.join("CMakeFiles");
-  if cmakefiles_dir.exists() {
-    let _ = std::fs::remove_dir_all(&cmakefiles_dir);
+  if build_dir.exists() {
+    let _ = fs::remove_file(build_dir.join("CMakeCache.txt"));
+    let _ = fs::remove_dir_all(build_dir.join("CMakeFiles"));
   }
 
-  // Configure build with cmake
+  // Configure CMake.
   let mut cfg = cmake::Config::new(&src_dir);
-  cfg.profile("Release");
-  cfg.define(
-    "CMAKE_TOOLCHAIN_FILE",
-    ndk_root.join("build/cmake/android.toolchain.cmake"),
-  );
-  cfg.define("ANDROID_ABI", abi);
-  cfg.define(
-    "ANDROID_PLATFORM",
-    env::var("ANDROID_PLATFORM").unwrap_or_else(|_| "21".to_string()),
-  );
-  cfg.define("BUILD_SHARED_LIBS", "OFF");
-  // Feature trims to minimize deps
-  cfg.define("LIBXML2_WITH_PYTHON", "OFF");
-  cfg.define("LIBXML2_WITH_LZMA", "OFF");
-  cfg.define("LIBXML2_WITH_ZLIB", "OFF");
-  cfg.define("LIBXML2_WITH_ICONV", "OFF");
-  cfg.define("LIBXML2_WITH_TESTS", "OFF");
-  cfg.define("LIBXML2_WITH_PROGRAMS", "OFF");
+  cfg
+    .profile("Release")
+    .define(
+      "CMAKE_TOOLCHAIN_FILE",
+      ndk_root.join("build/cmake/android.toolchain.cmake"),
+    )
+    .define("ANDROID_ABI", abi)
+    .define("ANDROID_PLATFORM", api.to_string())
+    .define("BUILD_SHARED_LIBS", "OFF")
+    // Trim features to reduce binary size and dependencies.
+    .define("LIBXML2_WITH_PYTHON", "OFF")
+    .define("LIBXML2_WITH_LZMA", "OFF")
+    .define("LIBXML2_WITH_ZLIB", "OFF")
+    .define("LIBXML2_WITH_ICONV", "OFF")
+    .define("LIBXML2_WITH_TESTS", "OFF")
+    .define("LIBXML2_WITH_PROGRAMS", "OFF");
 
-  // Prefer Ninja and require it on Windows to avoid MSBuild generator issues
-  match which::which("ninja") {
-    Ok(ninja_path) => {
-      cfg.generator("Ninja");
-      cfg.define("CMAKE_MAKE_PROGRAM", ninja_path);
-    }
-    Err(_) => {
-      #[cfg(target_os = "windows")]
-      {
-        panic!(
-          "Ninja not found. On Windows, please install Ninja (scoop install ninja) to build Android with CMake+NDK."
-        );
-      }
-      // On non-Windows we let CMake pick a default, though Ninja is still recommended
-    }
+  // Prefer using the Ninja generator.
+  if let Ok(ninja_path) = which::which("ninja") {
+    cfg.generator("Ninja");
+    cfg.define("CMAKE_MAKE_PROGRAM", ninja_path);
+  } else if cfg!(target_os = "windows") {
+    panic!(
+      "Ninja not found. On Windows, please install Ninja (e.g., `scoop install ninja`) for Android builds."
+    );
   }
 
-  // Point to explicit compilers from NDK to avoid tool name mismatches
-  let prebuilt = ndk_root.join("toolchains/llvm/prebuilt").join(host_tag);
-  let bin = prebuilt.join("bin");
-  let sysroot = prebuilt.join("sysroot");
-  // Prefer API-suffixed compilers; fallback to plain
-  let cc_api = bin.join(format!("{}-clang", clang_target));
-  let cxx_api = bin.join(format!("{}-clang++", clang_target));
-  let plain = clang_target.trim_end_matches(|c: char| c.is_ascii_digit());
-  let cc_plain = bin.join(format!("{}-clang", plain));
-  let cxx_plain = bin.join(format!("{}-clang++", plain));
-
-  #[cfg(target_os = "windows")]
-  fn with_cmd(p: PathBuf) -> PathBuf {
-    let mut x = p;
-    if x.extension().is_none() {
-      x.set_extension("cmd");
-    }
-    x
-  }
-  #[cfg(not(target_os = "windows"))]
-  fn with_cmd(p: PathBuf) -> PathBuf {
-    p
-  }
-
-  let cc = if cc_api.exists() {
-    with_cmd(cc_api)
-  } else {
-    with_cmd(cc_plain)
-  };
-  let cxx = if cxx_api.exists() {
-    with_cmd(cxx_api)
-  } else {
-    with_cmd(cxx_plain)
-  };
-
-  cfg.define("CMAKE_C_COMPILER", &cc);
-  cfg.define("CMAKE_CXX_COMPILER", &cxx);
-  cfg.define("CMAKE_SYSROOT", &sysroot);
-  // Force Android system to prevent Windows detection
-  cfg.define("CMAKE_SYSTEM_NAME", "Android");
-  cfg.define("CMAKE_SYSTEM_VERSION", api.to_string());
-  cfg.define("CMAKE_ANDROID_ARCH_ABI", abi);
-  // Remove conflicting target flags - let NDK toolchain handle this
-  cfg.define("CMAKE_C_FLAGS", "");
-  cfg.define("CMAKE_CXX_FLAGS", "");
-  cfg.define("CMAKE_ASM_FLAGS", "");
-
+  // Run the build.
   let dst = cfg.build();
   let include_dir = dst.join("include").join("libxml2");
+
   if !include_dir.exists() {
     panic!(
-      "libxml2 include directory not found at {}",
+      "libxml2 include directory not found after build at {}",
       include_dir.display()
     );
   }
+
   (dst, include_dir)
 }
 
-fn ndk_host_tag() -> String {
-  let host = env::var("HOST").unwrap_or_default();
-  if host.contains("windows") {
-    return "windows-x86_64".to_string();
-  }
-  if host.contains("apple-darwin") {
-    if host.starts_with("aarch64-") {
-      return "darwin-arm64".to_string();
-    }
-    return "darwin-x86_64".to_string();
-  }
-  // linux default
-  "linux-x86_64".to_string()
-}
-
-// Map clang target to sysroot arch include subdir
-fn arch_triple_for_sysroot(clang_target: &str) -> String {
-  if clang_target.starts_with("aarch64-") {
-    return "aarch64-linux-android".to_string();
-  }
-  if clang_target.starts_with("armv7") || clang_target.contains("androideabi") {
-    return "arm-linux-androideabi".to_string();
-  }
-  if clang_target.starts_with("i686-") {
-    return "i686-linux-android".to_string();
-  }
-  if clang_target.starts_with("x86_64-") {
-    return "x86_64-linux-android".to_string();
-  }
-  // fallback: strip trailing digits (API) if any
-  clang_target
-    .trim_end_matches(|c: char| c.is_ascii_digit())
-    .trim_end_matches('-')
-    .to_string()
-}
-
-fn generate_bindings(header_dirs: Vec<PathBuf>, extra_clang_args: &[String], output_path: &Path) {
-  let bindings = bindgen::Builder::default()
+/// Generates Rust bindings using bindgen.
+fn generate_bindings(include_paths: &[PathBuf], extra_clang_args: &[String], output_path: &Path) {
+  let mut builder = bindgen::Builder::default()
     .header("src/wrapper.h")
-    .opaque_type("max_align_t")
-    // invalidate build as soon as the wrapper changes
+    .opaque_type("max_align_t") // Avoids generating an unstable definition for `max_align_t`.
     .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
     .layout_tests(true)
-    .clang_args(&[
+    .clang_args([
       "-DPKG-CONFIG",
       "-DLIBXML_C14N_ENABLED",
       "-DLIBXML_OUTPUT_ENABLED",
-    ])
-    .clang_args(header_dirs.iter().map(|dir| format!("-I{}", dir.display())))
-    .clang_args(extra_clang_args);
-  bindings
+    ]);
+
+  // Add include search paths.
+  for path in include_paths {
+    builder = builder.clang_arg(format!("-I{}", path.display()));
+  }
+
+  // Add platform-specific clang arguments.
+  builder = builder.clang_args(extra_clang_args);
+
+  builder
     .generate()
-    .expect("failed to generate bindings with bindgen")
+    .expect("Failed to generate bindings with bindgen")
     .write_to_file(output_path)
-    .expect("Failed to write bindings.rs");
-}
-
-fn main() {
-  let bindings_path = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("bindings.rs");
-  // declare availability of config variable (without setting it)
-  println!("cargo::rustc-check-cfg=cfg(libxml_older_than_2_12)");
-
-  if let Some(probed_lib) = find_libxml2() {
-    // if we could find header files, generate fresh bindings from them
-    generate_bindings(
-      probed_lib.include_paths,
-      &probed_lib.clang_args,
-      &bindings_path,
-    );
-    // and expose the libxml2 version to the code
-    let version_parts: Vec<i32> = probed_lib
-      .version
-      .split('.')
-      .map(|part| part.parse::<i32>().unwrap_or(-1))
-      .collect();
-    let older_than_2_12 = version_parts.len() > 1
-      && (version_parts[0] < 2 || version_parts[0] == 2 && version_parts[1] < 12);
-    println!("cargo::rustc-check-cfg=cfg(libxml_older_than_2_12)");
-    if older_than_2_12 {
-      println!("cargo::rustc-cfg=libxml_older_than_2_12");
-    }
-  } else {
-    // otherwise, use the default bindings on platforms where pkg-config isn't available
-    fs::copy(PathBuf::from("src/default_bindings.rs"), bindings_path)
-      .expect("Failed to copy the default bindings to the build directory");
-    // for now, assume that the library is older than 2.12, because that's what those bindings are computed with
-    println!("cargo::rustc-cfg=libxml_older_than_2_12");
-  }
-}
-
-#[cfg(all(target_family = "windows", target_env = "msvc"))]
-mod vcpkg_dep {
-  use crate::ProbedLib;
-  pub fn vcpkg_find_libxml2() -> Option<ProbedLib> {
-    if let Ok(metadata) = vcpkg::Config::new().find_package("libxml2") {
-      Some(ProbedLib {
-        version: vcpkg_version(),
-        include_paths: metadata.include_paths,
-        clang_args: vec![],
-      })
-    } else {
-      None
-    }
-  }
-
-  fn vcpkg_version() -> String {
-    // What is the best way to obtain the version on Windows *before* bindgen runs?
-    // here we attempt asking the shell for "vcpkg list libxml2"
-    let mut vcpkg_exe = vcpkg::find_vcpkg_root(&vcpkg::Config::new()).unwrap();
-    vcpkg_exe.push("vcpkg.exe");
-    let vcpkg_list_libxml2 = std::process::Command::new(vcpkg_exe)
-      .args(["list", "libxml2"])
-      .output()
-      .expect("vcpkg.exe failed to execute in vcpkg_dep build step");
-    if vcpkg_list_libxml2.status.success() {
-      let libxml2_list_str = String::from_utf8_lossy(&vcpkg_list_libxml2.stdout);
-      for line in libxml2_list_str.lines() {
-        if line.starts_with("libxml2:") {
-          let mut version_piece = line.split("2.");
-          version_piece.next();
-          if let Some(version_tail) = version_piece.next()
-            && let Some(version) = version_tail.split(' ').next().unwrap().split('#').next()
-          {
-            return format!("2.{version}");
-          }
-        }
-      }
-    }
-    // default to a recent libxml2 from Windows 10
-    // (or should this panic?)
-    String::from("2.13.5")
-  }
+    .expect("Failed to write bindings to file");
 }
