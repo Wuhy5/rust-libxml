@@ -416,8 +416,21 @@ fn build_libxml2_for_android(ndk_root: &Path, abi: &str, api: u32) -> (PathBuf, 
   let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
   let src_dir = out_dir.join("libxml2-src");
 
-  // Clone the libxml2 repository if it doesn't exist.
+  // If libxml2 is already built and the include directory exists, skip clone and build for efficiency.
+  let build_dir = out_dir.join("build");
+  let dst = out_dir.join("libxml2-build");
+  let include_dir = dst.join("include").join("libxml2");
+
+  if include_dir.exists() {
+  // Already built, return the existing build and include directory.
+    return (dst, include_dir);
+  }
+
+  // Clone the libxml2 repository if it does not exist locally.
   if !src_dir.exists() {
+    if which::which("git").is_err() {
+      panic!("Git not found. Please install git and ensure it is in your PATH.");
+    }
     let repo_url = env::var("LIBXML2_GIT")
       .unwrap_or_else(|_| "https://github.com/GNOME/libxml2.git".to_string());
     let status = Command::new("git")
@@ -438,7 +451,6 @@ fn build_libxml2_for_android(ndk_root: &Path, abi: &str, api: u32) -> (PathBuf, 
   }
 
   // remove CMake cache
-  let build_dir = out_dir.join("build");
   if build_dir.exists() {
     let _ = fs::remove_file(build_dir.join("CMakeCache.txt"));
     let _ = fs::remove_dir_all(build_dir.join("CMakeFiles"));
@@ -467,15 +479,24 @@ fn build_libxml2_for_android(ndk_root: &Path, abi: &str, api: u32) -> (PathBuf, 
   if let Ok(ninja_path) = which::which("ninja") {
     cfg.generator("Ninja");
     cfg.define("CMAKE_MAKE_PROGRAM", ninja_path);
-  } else if cfg!(target_os = "windows") {
-    panic!(
-      "Ninja not found. On Windows, please install Ninja (e.g., `scoop install ninja`) for Android builds."
-    );
+  } else {
+    #[cfg(target_os = "windows")]
+    {
+      panic!(
+        "Ninja not found. On Windows, please install Ninja (e.g., `scoop install ninja`) for Android builds."
+      );
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+      eprintln!("Warning: Ninja not detected. It is recommended to install Ninja (e.g., `sudo apt install ninja-build` or `brew install ninja`) for faster builds. Falling back to default CMake generator, which may be slower.");
+    }
   }
 
   // Run the build.
-  let dst = cfg.build();
-  let include_dir = dst.join("include").join("libxml2");
+  let build_result = cfg.build();
+  // 为兼容原逻辑，build() 返回的路径可能不是 dst，重新赋值。
+  let include_dir = build_result.join("include").join("libxml2");
+  let dst = build_result;
 
   if !include_dir.exists() {
     panic!(
