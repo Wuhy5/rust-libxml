@@ -86,7 +86,6 @@ Environment (PowerShell examples):
 
 * Set NDK path: `$env:ANDROID_NDK_ROOT="D:\\SDK\\AndroidSDK\\ndk\\<version>"`
 * Optional API level (default 21): `$env:ANDROID_PLATFORM="24"`
-* Ensure NDK LLVM toolchain is on PATH: `$env:Path = "$env:ANDROID_NDK_ROOT\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin;$env:Path"`
 
 Build:
 
